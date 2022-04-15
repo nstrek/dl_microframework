@@ -1,6 +1,8 @@
 import numpy as np
 from typing import AnyStr, Callable, Tuple, Dict, Union, List
 
+import torch
+
 eps = 1e-16
 
 
@@ -11,6 +13,7 @@ class Tensor:
         self.requires_grad = requires_grad
         if self.requires_grad:
             self.grad = np.empty_like(value)
+            self.grad.fill(None)
         else:
             self.grad = None
 
@@ -97,7 +100,11 @@ class Operation:
         #     raise ValueError(f'*args must be Tensor or Tuple of Tensors {args=}')
 
         self.last_forward_result = {'f': self.compute_function(*args), 'df': self.compute_derivatives(*args)}
-        print(self.name, self.last_forward_result['f'].shape)
+        # print(self.name, self.last_forward_result['f'].shape)
+
+        assert len(self.last_forward_result['f'].shape) == 2, self.last_forward_result['f'].shape
+        assert all([len(item.shape) == 3 for key, item in self.last_forward_result['df'].items()]), \
+            f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
         return self.last_forward_result['f']
 
     def backward(self):
@@ -105,9 +112,10 @@ class Operation:
             self.dfdx_adjusted_after_backward = self.last_forward_result['df']['dfdx']
         else:
             # print(self.next_nodes[0].last_forward_result['df'], self.dfdx_adjusted_after_backward)
-            self.dfdx_adjusted_after_backward = np.dot(self.next_nodes[0].dfdx_adjusted_after_backward, self.next_nodes[0].last_forward_result['df']['dfdx'])
+            self.dfdx_adjusted_after_backward = np.dot(self.next_nodes[0].dfdx_adjusted_after_backward,
+                                                       self.next_nodes[0].last_forward_result['df']['dfdx'])
 
-        print(self.dfdx_adjusted_after_backward, 'dfdx_adjusted')
+        print(self.dfdx_adjusted_after_backward, 'dfdx_adjusted', self.dfdx_adjusted_after_backward.shape)
 
 
 class Loss(Operation):
@@ -118,6 +126,34 @@ class Loss(Operation):
                  params: Union[Parameters, None]):
         super(Operation, self).__init__(name=name, f=f, df=df, params=params)
 
+    def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:
+        y = super(Loss, self).forward(*args)
+        assert len(y.shape) == 2 and y.shape[1] == 1 and all([y.shape[0] == x.shape[0] for x in args]), \
+            f'{y.shape=}\t{[x.shape for x in args]}'
+        return y
+
+    def backward(self):
+        dfdx = self.last_forward_result['df']['dfdx']
+        for sample_num in range(dfdx.shape[0]):
+            d = dfdx[sample_num].item()
+
+            if self.previous_nodes[0].params is not None:
+                for key, param in self.previous_nodes[0].params.items():
+                    if not isinstance(param, Tensor):
+                        continue
+
+                    print(type(param.grad), 'loss', key)
+
+                    # sum reduction hard coded
+                    if np.any(np.isnan(param.grad)):
+                        param.grad = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, :]
+                    else:
+                        param.grad += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, :]
+
+            # for key in self.previous_nodes[0].last_forward_result['df'].keys():
+            #     self.previous_nodes[0].last_forward_result['df'][key] *= d
+            self.previous_nodes[0].last_forward_result['df']['dfdx'][sample_num, :] *= d
+
 
 class Activation(Operation):
     def __init__(self,
@@ -127,14 +163,69 @@ class Activation(Operation):
                  params: Union[Parameters, None]):
         super(Operation, self).__init__(name=name, f=f, df=df, params=params)
 
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        y = super(Activation, self).forward(x)
+        assert y.shape == x.shape
+        return y
+
+    def backward(self):
+        dfdx = self.last_forward_result['df']['dfdx']
+        for sample_num in range(dfdx.shape[0]):
+            for i in range(dfdx.shape[1]):
+                d = self.last_forward_result['df']['dfdx'][sample_num, i].item()
+
+                if self.previous_nodes[0].params is not None:
+                    for key, param in self.previous_nodes[0].params.items():
+                        if not isinstance(param, Tensor):
+                            continue
+
+                        print(type(param.grad), 'activation', key)
+
+                        # sum reduction hard coded
+                        if np.any(np.isnan(param.grad)):
+                            param.grad[i] = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, i]
+                        else:
+                            param.grad[i] += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, i]
+
+                self.last_forward_result['df']['dfdx'][sample_num, i] *= d
+
 
 class Layer(Operation):
     def __init__(self,
                  name: AnyStr,
-                 f: Callable[[Tensor, Tensor], Tensor],
-                 df: Callable[[Tensor, Tensor], Tensor],
+                 f: Callable[[Tensor, Parameters], Tensor],
+                 df: Callable[[Tensor, Parameters], Tensor],
                  params: Parameters):
         super(Operation, self).__init__(name=name, f=f, df=df, params=params)
+
+    def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:
+        y = super(Layer, self).forward(*args)
+        assert all([y.shape[0] == x.shape[0] for x in args])
+        return y
+
+    def backward(self):
+        dfdx = self.last_forward_result['df']['dfdx']
+        print(dfdx.shape, self.name)
+        for sample_num in range(dfdx.shape[0]):
+            for i in range(dfdx.shape[1]):
+                for j in range(dfdx.shape[2]):
+                    d = dfdx[sample_num, i, j].item()
+
+                    if self.previous_nodes[0].params is not None:
+                        for key, param in self.previous_nodes[0].params.items():
+                            if not isinstance(param, Tensor):
+                                continue
+
+                            print(type(param.grad), 'layer', key)
+
+                            # sum reduction hard coded
+                            if np.any(np.isnan(param.grad)):
+                                param.grad[i, j] = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, i, j]
+                            else:
+                                param.grad[i, j] += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, i, j]
+
+                    self.last_forward_result['df']['dfdx'][sample_num, i, j] *= d
+
 
 
 class Optimizer:
@@ -144,8 +235,8 @@ class Optimizer:
 class Dense(Layer):
     def __init__(self, input_size, output_size):
         dense_params = Parameters()
-        dense_params['A'] = Tensor(np.random.random((output_size, input_size)))
-        dense_params['b'] = Tensor(np.random.random(output_size))
+        dense_params['A'] = Tensor(np.random.random((output_size, input_size)), requires_grad=True)
+        dense_params['b'] = Tensor(np.random.random(output_size), requires_grad=True)
 
         f = lambda x, params: \
             (np.matmul(params['A'].value[None, :, :], x[:, :, None]) + params['b'].value[:, None]).squeeze(-1)
@@ -158,12 +249,16 @@ class Dense(Layer):
 
         super(Layer, self).__init__(name='Dense', f=f, df=df, params=dense_params)
 
-    def backward(self):
-        super(Layer, self).backward()
-        curr_forward = self.last_forward_result
+    # def backward(self):
+    #     super(Layer, self).backward()
+    #     curr_forward = self.last_forward_result
 
-        self.params['A'].grad = curr_forward['df']['dfdA'] * self.dfdx_adjusted_after_backward
-        self.params['b'].grad = curr_forward['df']['dfdb'] * self.dfdx_adjusted_after_backward
+        # self.params['A'].grad = np.sum(curr_forward['df']['dfdA'] * self.dfdx_adjusted_after_backward, axis=0)
+        # self.params['b'].grad = np.sum(curr_forward['df']['dfdb'] * self.dfdx_adjusted_after_backward, axis=0)
+
+
+        # self.params['A'].grad = curr_forward['df']['dfdA'] * self.dfdx_adjusted_after_backward
+        # self.params['b'].grad = curr_forward['df']['dfdb'] * self.dfdx_adjusted_after_backward
 
 
 class Sigmoid(Activation):
@@ -177,19 +272,22 @@ class Sigmoid(Activation):
 
 
 class BinaryCrossEntropy(Loss):
-    def __init__(self):
-        # TODO: Хорошо бы где-то сделать проверки shape'ов и это касается не только этого случая
+    def __init__(self, reduction='sum'):
         # TODO: Запилить другие reduction, не только сумму
-        f = lambda pred, target, params: -np.sum(np.dot(target, np.log(pred)) + np.dot((1 - target), np.log(1 - pred)), axis=0)
-        dfdx = lambda pred, target, params: -np.sum((target / pred) + (1 - target) / (1 - pred), axis=0)
-        df = lambda pred, target, params: {'dfdx': dfdx(pred, target, params)}
+        if reduction == 'sum':
+            f = lambda pred, target, params: -np.sum(target * np.log(pred) + (1 - target) * np.log(1 - pred), axis=0, keepdims=True)
+            dfdx = lambda pred, target, params: -np.sum((target / pred) + (1 - target) / (1 - pred), axis=0, keepdims=True)
+            df = lambda pred, target, params: {'dfdx': dfdx(pred, target, params)}
+        else:
+            raise ValueError(f'Unexpected value {reduction=}')
 
         bounding_pred = lambda pred: eps + pred * (1 - 2 * eps)
 
         bounded_f = lambda pred, target, params: f(bounding_pred(pred), target, params)
         bounded_df = lambda pred, target, params: df(bounding_pred(pred), target, params)
 
-        super(Loss, self).__init__(name='CrossEntropy', f=bounded_f, df=bounded_df, params=None)  # TODO: Добавить веса классов
+        super(Loss, self).__init__(name='BinaryCrossEntropy', f=bounded_f, df=bounded_df, params=None)
+        # TODO: Добавить веса классов
 
 
 class BatchNormalization(Layer):
@@ -236,6 +334,10 @@ class Sequential(Model):
         for curr_operation in reversed(self.network_operations):
             curr_operation.backward()
 
+        # TODO: Reduction можно здесь сделать или нельзя, ведь grad у Tensor заданной размерности
+
+
+
 # dense = Dense(10, 2)
 #
 # X = Tensor(np.random.random((3, 10)))
@@ -260,16 +362,58 @@ class Sequential(Model):
 
 np.random.seed(0)
 
-model = Sequential([Dense(input_size=10, output_size=1), Sigmoid()], BinaryCrossEntropy())
+model = Sequential([Dense(input_size=10, output_size=5), Sigmoid(), Dense(input_size=5, output_size=1), Sigmoid()], BinaryCrossEntropy())
 
-X = np.random.random((3, 10))
-Y = 1 / (1 + np.exp(-np.sum(X, axis=1)))
+X = np.random.random((1, 10))
+Y = 1 / (1 + np.exp(-np.sum(X, axis=1, keepdims=True)))
 
-print(model.predict(X).shape, 'predict')
 print(model.forward(X, Y).shape)
 
 print(model.predict(X))
-print(model.forward(X, Y))
+print('forward', model.forward(X, Y))
 model.backward()
 
-print(model.network_operations[0].params['A'].grad)
+# quit()
+# print(model.network_operations[0].params['A'].grad)
+
+torch_X = torch.from_numpy(X).cpu()
+torch_Y = torch.from_numpy(Y).cpu()
+
+
+class Network(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.layer1 = torch.nn.Linear(10, 5)
+        self.layer2 = torch.nn.Linear(5, 1)
+        self.sigmoid = lambda x: 1 / (1 + torch.exp(-x))#torch.nn.Sigmoid()
+
+    def forward(self, x):
+        return self.sigmoid(self.layer2(self.sigmoid(self.layer1(x))))
+
+
+torch_model = Network().cpu()
+with torch.no_grad():
+    torch_model.layer1.weight = torch.nn.Parameter(torch.from_numpy(model.network_operations[0].params['A'].value))
+    torch_model.layer1.bias = torch.nn.Parameter(torch.from_numpy(model.network_operations[0].params['b'].value * 1)) # Если не умножать на ноль, то разницы нет, а если умножать, то появляется
+    torch_model.layer2.weight = torch.nn.Parameter(torch.from_numpy(model.network_operations[2].params['A'].value))
+    torch_model.layer2.bias = torch.nn.Parameter(torch.from_numpy(model.network_operations[2].params['b'].value * 1)) # Если не умножать на ноль, то разницы нет, а если умножать, то появляется
+
+pred = model.predict(X)
+torch_pred = torch_model.forward(torch_X)
+print(torch_pred.shape, torch_Y.shape, pred.shape, Y.shape)
+torch_loss_func = lambda pred, target: -torch.sum(target * torch.log(eps + (1 - 2 * eps) * pred[:, 0]) + (1 - target) * torch.log(1 - eps - (1 - 2 * eps) * pred[:, 0])) #torch.nn.CrossEntropyLoss(reduction='sum')
+torch_loss = torch_loss_func(torch_pred, torch_Y)
+print(torch_loss.shape, torch_loss)
+torch_loss.backward()
+
+print('Ошибка предикта', np.linalg.norm(pred - torch_pred.detach().numpy()))
+
+print('Ошибка градиента', np.linalg.norm(model.network_operations[0].params['A'].value - torch_model.layer1.weight.grad.detach().numpy()))
+
+# При увеличении количества сэмплов торчевский градиент растет, а мой нет. Видимо где-то не суммируется
+# print(torch_model.hidden.weight.grad.detach().numpy())
+# print(model.network_operations[0].params['A'].value)
+#
+# for operation in model.network_operations:
+#     print(operation.dfdx_adjusted_after_backward.shape)
