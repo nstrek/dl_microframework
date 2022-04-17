@@ -106,19 +106,29 @@ class Operation:
         self.input_size = input_size
         self.output_size = output_size
 
-    def forward(self, *args: Union[
-        np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:  # -> Dict[AnyStr, Union[Tensor, Dict[AnyStr, Tensor]]]:
+    def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:  # -> Dict[AnyStr, Union[Tensor, Dict[AnyStr, Tensor]]]:
         # if not isinstance(args[0], Tensor):
         #     raise ValueError(f'*args must be Tensor or Tuple of Tensors {args=}')
 
         self.last_forward_result = {'f': self.compute_function(*args), 'df': self.compute_derivatives(*args)}
         # print(self.name, self.last_forward_result['f'].shape)
 
-        assert len(self.last_forward_result['f'].shape) == 2, self.last_forward_result['f'].shape
-        assert all([len(item.shape) == 3 for key, item in self.last_forward_result['df'].items()]), \
-            f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
+        assert all([self.input_size == arg.shape[1] for arg in args])
 
-        # dfdx (batch_size, output_size, input_size)
+        assert len(self.last_forward_result['f'].shape) == 2, self.last_forward_result['f'].shape
+
+        # TODO: Проверка shape параметров должна лежать на плечах forward наследника Layer
+        # assert all([len(item.shape) == 3 for key, item in self.last_forward_result['df'].items()]), \
+        #     f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
+
+
+        # assert len(self.last_forward_result['df']['dfdx'].shape) == 3, \
+        #     f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
+
+        # assert self.last_forward_result['df']['dfdx'].shape == (args[0].shape[0], self.output_size, self.input_size), \
+        #     f'dfdx shape must be (batch_size, output_size, input_size), ' \
+        #     f'but yout input is {self.last_forward_result["df"]["dfdx"].shape=}\t' \
+        #     f'{args[0].shape[0]=}'
 
         return self.last_forward_result['f']
 
@@ -192,8 +202,8 @@ class Activation(Operation):
     def backward(self):
         dfdx = self.last_forward_result['df']['dfdx']
         for sample_num in range(dfdx.shape[0]):
-            for i in range(dfdx.shape[1]):
-                d = self.last_forward_result['df']['dfdx'][sample_num, i].item()
+            for output_index in range(dfdx.shape[1]):
+                d = self.last_forward_result['df']['dfdx'][sample_num, output_index].item()
 
                 if self.previous_nodes[0].params is not None:
                     for key, param in self.previous_nodes[0].params.items():
@@ -204,13 +214,11 @@ class Activation(Operation):
 
                         # sum reduction hard coded
                         if np.any(np.isnan(param.grad)):
-                            param.grad[i] = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][
-                                sample_num, i]
+                            param.grad[output_index] = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, output_index]
                         else:
-                            param.grad[i] += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][
-                                sample_num, i]
+                            param.grad[output_index] += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, output_index]
 
-                self.last_forward_result['df']['dfdx'][sample_num, i] *= d
+                self.previous_nodes[0].last_forward_result['df']['dfdx'][sample_num, output_index] *= d
 
 
 class Layer(Operation):
@@ -223,16 +231,27 @@ class Layer(Operation):
 
     def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:
         y = super(Layer, self).forward(*args)
+        assert len(self.last_forward_result['df']['dfdx'].shape) == 3, \
+            f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
+
+        assert self.last_forward_result['df']['dfdx'].shape == (args[0].shape[0], self.output_size, self.input_size), \
+            f'dfdx shape must be (batch_size, output_size, input_size), ' \
+            f'but yout input is {self.last_forward_result["df"]["dfdx"].shape=}\t' \
+            f'{args[0].shape[0]=}'
+
         assert all([y.shape[0] == x.shape[0] for x in args])
         return y
 
     def backward(self):
+        if len(self.previous_nodes) == 0:
+            return
+        
         dfdx = self.last_forward_result['df']['dfdx']
         print(dfdx.shape, self.name)
         for sample_num in range(dfdx.shape[0]):
-            for i in range(dfdx.shape[1]):
-                for j in range(dfdx.shape[2]):
-                    d = dfdx[sample_num, i, j].item()
+            for output_index in range(dfdx.shape[1]):
+                for input_index in range(dfdx.shape[2]):
+                    d = dfdx[sample_num, output_index, input_index].item()
 
                     if self.previous_nodes[0].params is not None:
                         for key, param in self.previous_nodes[0].params.items():
@@ -243,13 +262,11 @@ class Layer(Operation):
 
                             # sum reduction hard coded
                             if np.any(np.isnan(param.grad)):
-                                param.grad[i, j] = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][
-                                    sample_num, i, j]
+                                param.grad[output_index, input_index] = d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, output_index, input_index]
                             else:
-                                param.grad[i, j] += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][
-                                    sample_num, i, j]
+                                param.grad[output_index, input_index] += d * self.previous_nodes[0].last_forward_result['df'][f'dfd{key}'][sample_num, output_index, input_index]
 
-                    self.last_forward_result['df']['dfdx'][sample_num, i, j] *= d
+                    self.last_forward_result['df']['dfdx'][sample_num, output_index, input_index] *= d
 
 
 class Dense(Layer):
@@ -258,9 +275,9 @@ class Dense(Layer):
         dense_params['A'] = Tensor(np.random.random((output_size, input_size)), requires_grad=True)
         dense_params['b'] = Tensor(np.random.random(output_size), requires_grad=True)
 
-        f = lambda x, params: \
-            (np.matmul(params['A'].value[None, :, :], x[:, :, None]) + params['b'].value[:, None]).squeeze(-1)
-        dfdx = lambda x, params: np.matmul(params['A'].value[None, :, :], np.ones_like(x[:, :, None])).squeeze(-1)
+        f = lambda x, params: (np.matmul(params['A'].value[None, :, :], x[:, :, None]) + params['b'].value[:, None]).squeeze(-1)
+        dfdx = lambda x, params: np.tile(params['A'].value, (x.shape[0], 1, 1))#np.matmul(params['A'].value[None, :, :], np.ones_like(x[:, :, None])).squeeze(-1)
+
 
         dfdA = lambda x, params: np.tile(np.expand_dims(x, axis=1), (1, params['A'].value.shape[0], 1))
         dfdb = lambda x, params: np.ones((x.shape[0], params['b'].value.shape[0]))
@@ -295,10 +312,8 @@ class BinaryCrossEntropy(Loss):
     def __init__(self, reduction='sum'):
         # TODO: Запилить другие reduction, не только сумму
         if reduction == 'sum':
-            f = lambda pred, target, params: -np.sum(target * np.log(pred) + (1 - target) * np.log(1 - pred), axis=0,
-                                                     keepdims=True)
-            dfdx = lambda pred, target, params: -np.sum((target / pred) + (1 - target) / (1 - pred), axis=0,
-                                                        keepdims=True)
+            f = lambda pred, target, params: -(target * np.log(pred) + (1 - target) * np.log(1 - pred))
+            dfdx = lambda pred, target, params: -((target / pred) + (1 - target) / (1 - pred))
             df = lambda pred, target, params: {'dfdx': dfdx(pred, target, params)}
         else:
             raise ValueError(f'Unexpected value {reduction=}')
@@ -413,7 +428,7 @@ np.random.seed(0)
 model = Sequential([Dense(input_size=10, output_size=5), Sigmoid(), Dense(input_size=5, output_size=1), Sigmoid()],
                    BinaryCrossEntropy())
 
-X = np.random.random((1, 10))
+X = np.random.random((100, 10))
 Y = 1 / (1 + np.exp(-np.sum(X, axis=1, keepdims=True)))
 
 print(model.forward(X, Y).shape)
@@ -465,9 +480,14 @@ print('Ошибка предикта', np.linalg.norm(pred - torch_pred.detach()
 print('Ошибка градиента',
       np.linalg.norm(model.network_operations[0].params['A'].value - torch_model.layer1.weight.grad.detach().numpy()))
 
+# for operation in model.network_operations:
+#     print([item.shape for key, item in operation.last_forward_result['df'].items()])
+
 # При увеличении количества сэмплов торчевский градиент растет, а мой нет. Видимо где-то не суммируется
-# print(torch_model.hidden.weight.grad.detach().numpy())
-# print(model.network_operations[0].params['A'].value)
+print(torch_model.layer1.weight.grad.detach().numpy())
+print(model.network_operations[0].params['A'].grad)
+
+print(model.network_operations[0].params['A'].grad / torch_model.layer1.weight.grad.detach().numpy())
 #
 # for operation in model.network_operations:
 #     print(operation.dfdx_adjusted_after_backward.shape)
