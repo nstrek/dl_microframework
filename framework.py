@@ -215,7 +215,6 @@ class Dense(Layer):
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         y = super(Dense, self).forward(x)
-        print('frwd dense', self.last_forward_result['df']['dfdx'].shape)
 
         assert len(self.last_forward_result['df']['dfdx'].shape) == 3, \
             f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
@@ -280,8 +279,26 @@ class BinaryCrossEntropy(Loss):
 
 
 class BatchNormalization(Layer):
-    def __init__(self):
-        raise NotImplementedError()
+    def __init__(self, input_size: int, output_size=None):
+
+        btchnrm_params = Parameters()
+        btchnrm_params['gamma'] = Tensor(np.random.random((output_size, input_size)), requires_grad=True)
+        btchnrm_params['beta'] = Tensor(np.random.random(output_size), requires_grad=True)  # TODO: Может стоит задавать как (output_size, 1)
+
+        btchnrm_params['mu'] = Tensor(np.zeros(1), requires_grad=False)
+        btchnrm_params['sigma'] = Tensor(np.zeros(1), requires_grad=False)
+
+
+        f = lambda x, params: (np.matmul(params['A'].value[None, :, :], x[:, :, None]) + params['b'].value[:, None]).squeeze(-1)
+        dfdx = lambda x, params: np.tile(params['A'].value, (x.shape[0], 1, 1))#np.matmul(params['A'].value[None, :, :], np.ones_like(x[:, :, None])).squeeze(-1)
+
+        dfdA = lambda x, params: np.tile(np.expand_dims(x, axis=1), (1, params['A'].value.shape[0], 1))
+        dfdb = lambda x, params: np.ones((x.shape[0], params['b'].value.shape[0]))
+
+        df = lambda x, params: {'dfdx': dfdx(x, params), 'dfdA': dfdA(x, params), 'dfdb': dfdb(x, params)}
+
+        super(Layer, self).__init__(name='BatchNormalization', f=f, df=df, params=btchnrm_params)
+        super(Layer, self).set_shape(input_size=input_size, output_size=input_size)
 
 
 class Optimizer:
