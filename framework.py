@@ -7,7 +7,7 @@ eps = 1e-16
 
 
 class Tensor:
-    def __init__(self, value: np.array, requires_grad=False):
+    def __init__(self, value: np.ndarray, requires_grad=False):
         self.value = value
 
         self.requires_grad = requires_grad
@@ -17,6 +17,7 @@ class Tensor:
         else:
             self.grad = None
 
+    # TODO: Tensor передавать всюду, а не np.ndarray
     # def __mul__(self, other):
     #     if isinstance(other, Tensor):
     #         other = other.value
@@ -106,29 +107,13 @@ class Operation:
         self.input_size = input_size
         self.output_size = output_size
 
-    def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:  # -> Dict[AnyStr, Union[Tensor, Dict[AnyStr, Tensor]]]:
-        # if not isinstance(args[0], Tensor):
-        #     raise ValueError(f'*args must be Tensor or Tuple of Tensors {args=}')
+    def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:
 
         self.last_forward_result = {'f': self.compute_function(*args), 'df': self.compute_derivatives(*args)}
-        # print(self.name, self.last_forward_result['f'].shape)
 
         assert all([self.input_size == arg.shape[1] for arg in args])
 
         assert len(self.last_forward_result['f'].shape) == 2, self.last_forward_result['f'].shape
-
-        # TODO: Проверка shape параметров должна лежать на плечах forward наследника Layer
-        # assert all([len(item.shape) == 3 for key, item in self.last_forward_result['df'].items()]), \
-        #     f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
-
-
-        # assert len(self.last_forward_result['df']['dfdx'].shape) == 3, \
-        #     f"Operation.name is {self.name} {dict([(key, item.shape) for key, item in self.last_forward_result['df'].items()])}"
-
-        # assert self.last_forward_result['df']['dfdx'].shape == (args[0].shape[0], self.output_size, self.input_size), \
-        #     f'dfdx shape must be (batch_size, output_size, input_size), ' \
-        #     f'but yout input is {self.last_forward_result["df"]["dfdx"].shape=}\t' \
-        #     f'{args[0].shape[0]=}'
 
         return self.last_forward_result['f']
 
@@ -172,11 +157,6 @@ class Activation(Operation):
     def forward(self, x: np.ndarray) -> np.ndarray:
         y = super(Activation, self).forward(x)
 
-        # new_shaped = np.empty((y.shape[0], y.shape[1], y.shape[1]))
-        # for sample_num in range(y.shape[0]):
-        #     new_shaped[sample_num] = np.diag(self.last_forward_result['df']['dfdx'][sample_num])
-        #
-        # self.last_forward_result['df']['dfdx'] = new_shaped
         assert y.shape == x.shape
         assert len(y.shape) == 2 and len(x.shape) == 2
         assert y.shape[1] == self.output_size and x.shape[1] == self.input_size
@@ -196,9 +176,6 @@ class Activation(Operation):
         for sample_num in range(curr_forward['f'].shape[0]):
             for output_index in range(self.output_size):
                 curr_forward['df']['dfdx'][sample_num, output_index] *= next_dfdx[sample_num, output_index]  # Здесь может быть и 3 измерения. Если дальше идет слой
-
-        # for output_index in range(self.output_size):
-        #     curr_forward['df']['dfdx'][:, output_index] = curr_forward['df']['dfdx'][:, output_index] * np.sum(next_forward['df']['dfdx'][:, output_index])
 
 
 class Layer(Operation):
@@ -269,8 +246,8 @@ class Dense(Layer):
 
                     # Sum reduction hard coded
                     self.params['A'].grad[output_index, input_index] += next_forward['df']['dfdx'][sample_num, output_index] * curr_forward['df']['dfdA'][sample_num, output_index, input_index]
-                    self.params['b'].grad[output_index] += next_forward['df']['dfdx'][sample_num, output_index] * curr_forward['df']['dfdb'][sample_num, output_index]
 
+                self.params['b'].grad[output_index] += next_forward['df']['dfdx'][sample_num, output_index] * curr_forward['df']['dfdb'][sample_num, output_index]
 
 
 class Sigmoid(Activation):
@@ -278,15 +255,6 @@ class Sigmoid(Activation):
         # TODO: Сделать возможность вычислять производную через значения функции
         f = lambda x, params: 1 / (1 + np.exp(-x))
         dfdx = lambda x, params: f(x, params) * (1 - f(x, params))
-
-        # def dfdx(x, params):
-        #     print(x.shape, *x[:, 0])
-        #     y = f(x, params)
-        #     print(y.shape, *y[:, 0])
-        #     y = y * (1 - y)
-        #     print(y.shape, *y[:, 0])
-        #     return y
-
         df = lambda x, params: {'dfdx': dfdx(x, params)}
 
         super(Activation, self).__init__(name='Sigmoid', f=f, df=df, params=None)
@@ -298,20 +266,6 @@ class BinaryCrossEntropy(Loss):
         if reduction == 'sum':
             f = lambda pred, target, params: -(target * np.log(pred) + (1 - target) * np.log(1 - pred))
             dfdx = lambda pred, target, params: (pred - target) / (pred * (1 - pred))
-
-            # def dfdx(pred, target, params):
-            #     res = np.zeros_like(pred, dtype=np.float64)
-            #
-            #     for sample_num in range(pred.shape[0]):
-            #         for output_index in range(pred.shape[1]):
-            #             t = target[sample_num, output_index]
-            #             p = pred[sample_num, output_index]
-            #             print(t, p, 'tp')
-            #             print(res[sample_num, output_index])
-            #             res[sample_num, output_index] = (p - t)/((1 - p) * p)
-            #
-            #     return res
-
             df = lambda pred, target, params: {'dfdx': dfdx(pred, target, params)}
         else:
             raise ValueError(f'Unexpected value {reduction=}')
@@ -380,13 +334,9 @@ class Sequential(Model):
 
         create_graph()
 
-        # for operation in [*self.network_operations, self.loss_func]:
-        #     print(operation.name, operation.input_size, operation.output_size)
-
     def predict(self, X):
         pred = X
         for operation in self.network_operations:
-            # print('check', isinstance(pred, np.ndarray), operation.name)
             pred = operation.forward(pred)
 
         return pred
@@ -402,170 +352,7 @@ class Sequential(Model):
         # TODO: Reduction можно здесь сделать или нельзя, ведь grad у Tensor заданной размерности
 
 
-# dense = Dense(10, 2)
-#
-# X = Tensor(np.random.random((3, 10)))
-#
-# pred = dense.forward(X)['df']
-#
-# print(pred.shape)
-# print(pred)
-# print(np.sum(pred, axis=0))
-#
-# import torch
-#
-# torch_A = torch.from_numpy(dense.params['A'].value)
-# torch_A.requires_grad_()
-# torch_X = torch.from_numpy(np.expand_dims(X.value, axis=2))
-#
-# f = torch.sum(torch.matmul(torch_A, torch_X))
-# print(f.shape)
-# f.backward()
-#
-# print(torch_A.grad.numpy())
-
-np.random.seed(0)
-
-model = Sequential([Dense(input_size=10, output_size=5), Sigmoid(), Dense(input_size=5, output_size=1), Sigmoid()],
-                   BinaryCrossEntropy())
-
-X = np.random.random((4, 10))
-Y = 1 / (1 + np.exp(-np.sum(X, axis=1, keepdims=True)))
-
-# print(model.forward(X, Y).shape)
-#
-# print(model.predict(X))
-# print('forward', model.forward(X, Y))
-model.forward(X, Y)
-
-# for operation in model.network_operations:
-#     if not isinstance(operation, Layer):
-#         continue
-#     print(operation.params['A'].grad)
-#     print(operation.params['b'].grad)
-
-model.backward()
-
-# quit()
-# print(model.network_operations[0].params['A'].grad)
-
-torch_X = torch.from_numpy(X).cpu()
-torch_Y = torch.from_numpy(Y).cpu()
-
-print('Ошибка таргета', np.linalg.norm(Y - torch_Y.numpy()))
-
-
-class Network(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.layer1 = torch.nn.Linear(10, 5)
-        self.layer2 = torch.nn.Linear(5, 1)
-        self.sigmoid = lambda x: 1 / (1 + torch.exp(-x))  # torch.nn.Sigmoid()
-
-    def forward(self, x):
-        return self.sigmoid(self.layer2(self.sigmoid(self.layer1(x))))
-
-
-torch_model = Network().cpu()
-with torch.no_grad():
-    torch_model.layer1.weight = torch.nn.Parameter(torch.from_numpy(model.network_operations[0].params['A'].value))
-    torch_model.layer1.bias = torch.nn.Parameter(torch.from_numpy(model.network_operations[0].params[
-                                                                      'b'].value * 1))  # Если не умножать на ноль, то разницы нет, а если умножать, то появляется
-    torch_model.layer2.weight = torch.nn.Parameter(torch.from_numpy(model.network_operations[2].params['A'].value))
-    torch_model.layer2.bias = torch.nn.Parameter(torch.from_numpy(model.network_operations[2].params[
-                                                                      'b'].value * 1))  # Если не умножать на ноль, то разницы нет, а если умножать, то появляется
-
-pred = model.predict(X)
-torch_pred = torch_model.forward(torch_X)
-print(torch_pred.shape, torch_Y.shape, pred.shape, Y.shape)
-torch_loss_func = lambda pred, target: -torch.sum(target[:, 0] * torch.log(eps + (1 - 2 * eps) * pred[:, 0]) + (1 - target[:, 0]) * torch.log(1 - eps - (1 - 2 * eps) * pred[:, 0]), axis=0)  # torch.nn.CrossEntropyLoss(reduction='sum')
-torch_loss = torch_loss_func(torch_pred, torch_Y)
-print(torch_loss.shape, torch_loss)
-torch_loss.backward()
-
-print('Ошибка предикта', np.linalg.norm(pred - torch_pred.detach().numpy()))
-print('Ошибка лосса', np.abs(np.sum(model.forward(X, Y), axis=0).item() - torch_loss.item()))
-print(np.sum(model.forward(X, Y)))
-
-print('Ошибка градиента', np.linalg.norm(model.network_operations[2].params['A'].grad - torch_model.layer2.weight.grad.detach().numpy()))
-
-# for operation in model.network_operations:
-#     print([item.shape for key, item in operation.last_forward_result['df'].items()])
-
-# При увеличении количества сэмплов торчевский градиент растет, а мой нет. Видимо где-то не суммируется
-print(torch_model.layer2.weight.grad.detach().numpy())
-print(model.network_operations[2].params['A'].grad)
-
-print(torch_model.layer2.weight.grad.detach().numpy() / model.network_operations[2].params['A'].grad)
-#
-# for operation in model.network_operations:
-#     print(operation.dfdx_adjusted_after_backward.shape)
-
-torch_bce = lambda pred, target: -torch.sum(target[:, 0] * torch.log(eps + (1 - 2 * eps) * pred[:, 0]) + (1 - target[:, 0]) * torch.log(1 - eps - (1 - 2 * eps) * pred[:, 0]), axis=0)
-torch_sigmoid = lambda x: 1 / (1 + torch.exp(-x))
-
-
 class Input(Layer):
     def __init__(self, input_size, output_size):
         super(Layer, self).__init__(name='Input', f=lambda x, params: x, df=lambda x, params: {'dfdx': np.ones_like(x)}, params=None)
         super(Layer, self).set_shape(input_size, output_size)
-
-def bce_test():
-    print('\n\n\nBCE TEST\n\n\n')
-
-    bce_model = Sequential([Input(1, 1)], BinaryCrossEntropy())
-    torch_bce_model = lambda x, y: torch_bce(x, y)
-
-    X = np.random.random((5, 1))
-    Y = np.array(X > np.mean(X), dtype=np.int64)
-
-    res = bce_model.forward(X, Y)
-    print(bce_model.loss_func.last_forward_result)
-    bce_model.backward()
-
-    torch_X = torch.from_numpy(X)
-    torch_X.requires_grad_()
-
-    torch_Y = torch.from_numpy(Y)
-
-    torch_res = torch_bce_model(torch_X, torch_Y)
-    torch_res.backward()
-
-    print('Ошибка лосса', np.sum(res) - torch_res.item(), np.sum(res), torch_res)
-    print('Ошибка градиента', np.linalg.norm(torch_X.grad.detach().numpy() - bce_model.loss_func.last_forward_result['df']['dfdx']))
-
-    print(torch_X.grad)
-    print(bce_model.loss_func.last_forward_result['df']['dfdx'])
-
-
-def sigmoid_test():
-    print('\n\n\nSIGMOID TEST\n\n\n')
-
-    sigmoid_model = Sequential([Input(1, 1), Sigmoid()], BinaryCrossEntropy())
-    torch_sigmoid_model = lambda x, y: torch_bce(torch_sigmoid(x), y)
-
-    X = np.random.random((5, 1))
-    Y = 10 / (1 + np.exp(-np.sum(X, axis=1, keepdims=True))) + 0.5
-
-    res = sigmoid_model.forward(X, Y)
-    sigmoid_model.backward()
-
-    torch_X = torch.from_numpy(X)
-    torch_X.requires_grad_()
-
-    torch_Y = torch.from_numpy(Y)
-
-    torch_res = torch_sigmoid_model(torch_X, torch_Y)
-    torch_res.backward()
-
-    print('Ошибка лосса', np.sum(res) - torch_res, np.sum(res), torch_res)
-    print('Ошибка градиента', np.linalg.norm(torch_X.grad.detach().numpy() - sigmoid_model.network_operations[1].last_forward_result['df']['dfdx']))
-
-    print(torch_X.grad)
-    print(sigmoid_model.network_operations[1].last_forward_result['df']['dfdx'])
-
-
-sigmoid_test()
-
-# bce_test()
