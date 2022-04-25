@@ -317,7 +317,6 @@ def test_sequential_with_batchnorm1d_0():
         statistics_error += np.linalg.norm(torch_operations[index].running_mean.numpy() - network_operations[index].params['mu'].value)
         statistics_error += np.linalg.norm(torch_operations[index].running_var.numpy() - network_operations[index].params['sigma'].value)
 
-
     if grad_error / 12 > TEST_EPS or np.isnan(grad_error):
         print(f'{grad_error / 12=}')
         return False

@@ -298,9 +298,6 @@ class BatchNormalization(Layer):
             curr_mean = np.mean(x, axis=0)
             curr_var = np.mean((x - curr_mean) ** 2, axis=0)
 
-            # import torch
-            # print('curr_var', curr_var, torch.var(torch.from_numpy(x), dim=0, unbiased=False, keepdim=True).numpy())
-
             self.last_forward_result['x'] = x
             self.last_forward_result['mu'] = curr_mean
             self.last_forward_result['sigma'] = curr_var
@@ -327,63 +324,13 @@ class BatchNormalization(Layer):
 
             return res
 
-
-        # def dmudx(x, params):
-        #     return np.ones((x.shape[0], x.shape[1])) / x.shape[0]
-        #
-        # def dsigmadx(x, params):
-        #     return (2 / x.shape[0]) * (x - self.last_forward_result['mu'][None, :])
-        #
         dfdgamma = lambda x, params: self.last_forward_result['normalization']
         dfdbeta = lambda x, params: np.ones_like(x)
-        #
-        # def dfdx(x, params):
-        #     res = np.zeros_like(x)
-        #
-        #     mu = self.last_forward_result['mu']
-        #     sigma = self.last_forward_result['sigma']
-        #
-        #     # sigma_sqrt = np.sqrt(sigma + eps)
-        #     #
-        #     # dsdx = dsigmadx(x, params)
-        #
-        #     for sample_num in range(x.shape[0]):
-        #         for output_index in range(x.shape[1]):
-        #             coef = params['gamma'].value[output_index] / (2 * (sigma[output_index] + eps) ** (3/2))
-        #
-        #             res[sample_num, output_index] = coef * (1 - (1 / x.shape[0])) * (sigma[output_index] + eps) * 2
-        #             res[sample_num, output_index] -= coef * (2 / x.shape[0]) * (x[sample_num, output_index] - mu[output_index]) ** 2
-        #
-        #     return res
-        #
-        # def dfdxc(x, params):
-        #     return params['gamma'].value
-        #
-        # def dfdsigma(x, params):
-        #     res = np.zeros_like(x)
-        #
-        #     mu = self.last_forward_result['mu']
-        #     sigma = self.last_forward_result['sigma']
-        #
-        #     for sample_num in range(res.shape[0]):
-        #         for output_index in range(res.shape[1]):
-        #             res[sample_num, output_index] = (mu[output_index] - x[sample_num, output_index]) / (2 * np.sqrt(sigma + eps) ** 3)
-        #
-        #     return res
-        #
-        # def dfdmu(x, params):
 
-        dfdx = lambda x, params: None
-
-        df = lambda x, params: {'dfdx': dfdx(x, params), 'dfdgamma': dfdgamma(x, params), 'dfdbeta': dfdbeta(x, params)}
+        df = lambda x, params: {'dfdgamma': dfdgamma(x, params), 'dfdbeta': dfdbeta(x, params)}
 
         super(Layer, self).__init__(name='BatchNormalization', f=f, df=df, params=btchnrm_params)
         super(Layer, self).set_shape(input_size=input_size, output_size=input_size)
-
-    # def forward(self, x: np.ndarray) -> np.ndarray:
-    #     res = super(BatchNormalization, self).forward(x)
-    #     print(x.shape, self.last_forward_result['f'].shape)
-    #     return res
 
     def backward(self):
         curr_forward = self.last_forward_result
@@ -401,7 +348,6 @@ class BatchNormalization(Layer):
         mu = self.last_forward_result['mu']
         sigma = self.last_forward_result['sigma']
 
-
         dldxc = np.zeros((curr_forward['f'].shape[0], self.output_size))
         dldsigma = np.zeros(self.output_size)
         dldmu = np.zeros(self.output_size)
@@ -417,8 +363,6 @@ class BatchNormalization(Layer):
         for output_index in range(self.output_size):
             for sample_num in range(curr_forward['f'].shape[0]):
                 dldmu[output_index] += (dldxc[sample_num, output_index] * (-1/(np.sqrt(sigma[output_index] + self.eps)))) + dldsigma[output_index] * (2 * (mu[output_index] - x[sample_num, output_index]) / x.shape[0])
-
-
 
         curr_forward['df']['dfdx'] = np.zeros((curr_forward['f'].shape[0], self.output_size))
 
