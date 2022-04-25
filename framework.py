@@ -290,6 +290,7 @@ class BatchNormalization(Layer):
         btchnrm_params['mu'] = Tensor(np.zeros(input_size), requires_grad=False)
         btchnrm_params['sigma'] = Tensor(np.ones(input_size), requires_grad=False)
 
+        self.eps = eps
         self.momentum = momentum
         self.training = True
 
@@ -300,6 +301,7 @@ class BatchNormalization(Layer):
             # import torch
             # print('curr_var', curr_var, torch.var(torch.from_numpy(x), dim=0, unbiased=False, keepdim=True).numpy())
 
+            self.last_forward_result['x'] = x
             self.last_forward_result['mu'] = curr_mean
             self.last_forward_result['sigma'] = curr_var
 
@@ -307,9 +309,9 @@ class BatchNormalization(Layer):
             params['sigma'].value = (1 - self.momentum) * params['sigma'].value + self.momentum * curr_var * (x.shape[0] / (x.shape[0] - 1))
 
             if self.training:
-                res = (x - curr_mean[None, :]) / np.sqrt(curr_var[None, :] + eps)
+                res = (x - curr_mean[None, :]) / np.sqrt(curr_var[None, :] + self.eps)
             else:
-                res = (x - params['mu'].value[None, :]) / np.sqrt(params['sigma'].value[None, :] + eps)
+                res = (x - params['mu'].value[None, :]) / np.sqrt(params['sigma'].value[None, :] + self.eps)
 
             self.last_forward_result['normalization'] = res
             return res
@@ -325,42 +327,53 @@ class BatchNormalization(Layer):
 
             return res
 
-        # dfdx = lambda x, params: np.tile(params['gamma'].value, (x.shape[0], 1))
+
+        # def dmudx(x, params):
+        #     return np.ones((x.shape[0], x.shape[1])) / x.shape[0]
         #
-        # dfdgamma = lambda x, params: np.tile(x, (1, params['gamma'].value.shape[0]))
-        # dfdbeta = lambda x, params: np.ones((x.shape[0], params['beta'].value.shape[0]))
+        # def dsigmadx(x, params):
+        #     return (2 / x.shape[0]) * (x - self.last_forward_result['mu'][None, :])
         #
-        # dfdmu = lambda x, params: None
-        # dfdsigma = lambda x, params: None
-
-        def dmudx(x, params):
-            return np.ones((x.shape[0], x.shape[1])) / x.shape[0]
-
-        def dsigmadx(x, params):
-            return (2 / x.shape[0]) * (x - self.last_forward_result['mu'][None, :])
-
-        dfdgamma = lambda x, params: self.last_forward_result['normalization']#np.sum(self.last_forward_result['normalization'], axis=0)
+        dfdgamma = lambda x, params: self.last_forward_result['normalization']
         dfdbeta = lambda x, params: np.ones_like(x)
+        #
+        # def dfdx(x, params):
+        #     res = np.zeros_like(x)
+        #
+        #     mu = self.last_forward_result['mu']
+        #     sigma = self.last_forward_result['sigma']
+        #
+        #     # sigma_sqrt = np.sqrt(sigma + eps)
+        #     #
+        #     # dsdx = dsigmadx(x, params)
+        #
+        #     for sample_num in range(x.shape[0]):
+        #         for output_index in range(x.shape[1]):
+        #             coef = params['gamma'].value[output_index] / (2 * (sigma[output_index] + eps) ** (3/2))
+        #
+        #             res[sample_num, output_index] = coef * (1 - (1 / x.shape[0])) * (sigma[output_index] + eps) * 2
+        #             res[sample_num, output_index] -= coef * (2 / x.shape[0]) * (x[sample_num, output_index] - mu[output_index]) ** 2
+        #
+        #     return res
+        #
+        # def dfdxc(x, params):
+        #     return params['gamma'].value
+        #
+        # def dfdsigma(x, params):
+        #     res = np.zeros_like(x)
+        #
+        #     mu = self.last_forward_result['mu']
+        #     sigma = self.last_forward_result['sigma']
+        #
+        #     for sample_num in range(res.shape[0]):
+        #         for output_index in range(res.shape[1]):
+        #             res[sample_num, output_index] = (mu[output_index] - x[sample_num, output_index]) / (2 * np.sqrt(sigma + eps) ** 3)
+        #
+        #     return res
+        #
+        # def dfdmu(x, params):
 
-        def dfdx(x, params):
-            res = np.zeros_like(x)
-
-            mu = self.last_forward_result['mu']
-            sigma = self.last_forward_result['sigma']
-
-            # sigma_sqrt = np.sqrt(sigma + eps)
-            #
-            # dsdx = dsigmadx(x, params)
-
-            for sample_num in range(x.shape[0]):
-                for output_index in range(x.shape[1]):
-                    coef = params['gamma'].value[output_index] / (2 * (sigma[output_index] + eps) ** (3/2))
-
-                    res[sample_num, output_index] = coef * (1 - (1 / x.shape[0])) * (sigma[output_index] + eps) * 2
-                    res[sample_num, output_index] -= coef * (2 / x.shape[0]) * (x[sample_num, output_index] - mu[output_index]) ** 2
-
-            return res
-
+        dfdx = lambda x, params: None
 
         df = lambda x, params: {'dfdx': dfdx(x, params), 'dfdgamma': dfdgamma(x, params), 'dfdbeta': dfdbeta(x, params)}
 
@@ -383,10 +396,39 @@ class BatchNormalization(Layer):
         if len(next_dfdx.shape) == 3:
             next_dfdx = np.sum(next_dfdx, axis=1)
 
-        for sample_num in range(curr_forward['f'].shape[0]):
-            for output_index in range(self.output_size):
-                curr_forward['df']['dfdx'][sample_num, output_index] = next_dfdx[sample_num, output_index] * self.params['gamma'][output_index] * (np.sqrt(self.last_forward_result['sigma'][output_index] + eps))
-                curr_forward['df']['dfdx'][sample_num, output_index] += 0
+        x = self.last_forward_result['x']
+        xc = self.last_forward_result['normalization']
+        mu = self.last_forward_result['mu']
+        sigma = self.last_forward_result['sigma']
+
+
+        dldxc = np.zeros((curr_forward['f'].shape[0], self.output_size))
+        dldsigma = np.zeros(self.output_size)
+        dldmu = np.zeros(self.output_size)
+
+        for output_index in range(self.output_size):
+            for sample_num in range(curr_forward['f'].shape[0]):
+                dldxc[sample_num, output_index] = next_dfdx[sample_num, output_index] * self.params['gamma'].value[output_index]
+
+        for output_index in range(self.output_size):
+            for sample_num in range(curr_forward['f'].shape[0]):
+                dldsigma[output_index] += dldxc[sample_num, output_index] * (mu[output_index] - x[sample_num, output_index]) / (2 * np.sqrt(sigma[output_index] + self.eps) ** 3)
+
+        for output_index in range(self.output_size):
+            for sample_num in range(curr_forward['f'].shape[0]):
+                dldmu[output_index] += (dldxc[sample_num, output_index] * (-1/(np.sqrt(sigma[output_index] + self.eps)))) + dldsigma[output_index] * (2 * (mu[output_index] - x[sample_num, output_index]) / x.shape[0])
+
+
+
+        curr_forward['df']['dfdx'] = np.zeros((curr_forward['f'].shape[0], self.output_size))
+
+        for output_index in range(self.output_size):
+            for sample_num in range(curr_forward['f'].shape[0]):
+                curr_forward['df']['dfdx'][sample_num, output_index] = dldxc[sample_num, output_index] / np.sqrt(sigma[output_index] + self.eps)
+
+                curr_forward['df']['dfdx'][sample_num, output_index] += 2 * dldsigma[output_index] * (x[sample_num, output_index] - mu[output_index]) / x.shape[0]
+
+                curr_forward['df']['dfdx'][sample_num, output_index] += dldmu[output_index] / x.shape[0]
 
 
                 # Sum reduction hard coded

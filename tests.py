@@ -219,8 +219,8 @@ def test_sequential_0():
     return True
 
 
-# @repeat
-# @try_except_print
+@repeat
+@try_except_print
 def test_sequential_with_batchnorm1d_0():
     network_operations = [
         Dense(10, 5),
@@ -280,12 +280,12 @@ def test_sequential_with_batchnorm1d_0():
     torch_Y = torch.from_numpy(Y).cpu()
 
     loss = model.forward(X, Y)
-    print(np.sum(loss), 'my loss')
+    # print(np.sum(loss), 'my loss')
     model.backward()
 
     torch_loss = torch_model(torch_X, torch_Y)
-    print(torch_loss)
-    print(torch_loss.item(), 'torch loss')
+    # print(torch_loss)
+    # print(torch_loss.item(), 'torch loss')
     torch_loss.backward()
 
     loss_error = np.abs(np.sum(loss) - torch_loss.item())
@@ -301,18 +301,18 @@ def test_sequential_with_batchnorm1d_0():
         grad_error += np.linalg.norm(torch_operations[index].weight.grad.numpy() - network_operations[index].params['A'].grad)
         grad_error += np.linalg.norm(torch_operations[index].bias.grad.numpy() - network_operations[index].params['b'].grad)
 
-        print('dense', index, torch_operations[index].weight.grad.numpy(), network_operations[index].params['A'].grad)
+        # print('dense', index, torch_operations[index].weight.grad.numpy(), network_operations[index].params['A'].grad)
 
     # bn
     for index in [2, 4, 7]:
         grad_error += np.linalg.norm(torch_operations[index].weight.grad.numpy() - network_operations[index].params['gamma'].grad)
         grad_error += np.linalg.norm(torch_operations[index].bias.grad.numpy() - network_operations[index].params['beta'].grad)
 
-        print(index, torch_operations[index].weight.grad.numpy(), network_operations[index].params['gamma'].grad)
-        print(index, torch_operations[index].bias.grad.numpy(), network_operations[index].params['beta'].grad)
-
-        print(index, torch_operations[index].running_mean.numpy(), network_operations[index].params['mu'].value)
-        print(index, torch_operations[index].running_var.numpy(), network_operations[index].params['sigma'].value)
+        # print(index, torch_operations[index].weight.grad.numpy(), network_operations[index].params['gamma'].grad)
+        # print(index, torch_operations[index].bias.grad.numpy(), network_operations[index].params['beta'].grad)
+        #
+        # print(index, torch_operations[index].running_mean.numpy(), network_operations[index].params['mu'].value)
+        # print(index, torch_operations[index].running_var.numpy(), network_operations[index].params['sigma'].value)
 
         statistics_error += np.linalg.norm(torch_operations[index].running_mean.numpy() - network_operations[index].params['mu'].value)
         statistics_error += np.linalg.norm(torch_operations[index].running_var.numpy() - network_operations[index].params['sigma'].value)
