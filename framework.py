@@ -108,8 +108,10 @@ class Operation:
         self.output_size = output_size
 
     def forward(self, *args: Union[np.ndarray, Tuple[np.ndarray]]) -> np.ndarray:
+        self.last_forward_result = {}
 
-        self.last_forward_result = {'f': self.compute_function(*args), 'df': self.compute_derivatives(*args)}
+        self.last_forward_result['f'] = self.compute_function(*args)
+        self.last_forward_result['df'] = self.compute_derivatives(*args)
 
         assert all([self.input_size == arg.shape[1] for arg in args])
 
@@ -279,26 +281,118 @@ class BinaryCrossEntropy(Loss):
 
 
 class BatchNormalization(Layer):
-    def __init__(self, input_size: int, output_size=None):
+    def __init__(self, input_size: int, output_size=None, momentum=0.1, eps=1e-5):
 
         btchnrm_params = Parameters()
-        btchnrm_params['gamma'] = Tensor(np.random.random((output_size, input_size)), requires_grad=True)
-        btchnrm_params['beta'] = Tensor(np.random.random(output_size), requires_grad=True)  # TODO: Может стоит задавать как (output_size, 1)
+        btchnrm_params['gamma'] = Tensor(np.ones(input_size), requires_grad=True)
+        btchnrm_params['beta'] = Tensor(np.zeros(input_size), requires_grad=True)  # TODO: Может стоит задавать как (output_size, 1)
 
-        btchnrm_params['mu'] = Tensor(np.zeros(1), requires_grad=False)
-        btchnrm_params['sigma'] = Tensor(np.zeros(1), requires_grad=False)
+        btchnrm_params['mu'] = Tensor(np.zeros(input_size), requires_grad=False)
+        btchnrm_params['sigma'] = Tensor(np.ones(input_size), requires_grad=False)
+
+        self.momentum = momentum
+        self.training = True
+
+        def normalization(x, params):
+            curr_mean = np.mean(x, axis=0)
+            curr_var = np.mean((x - curr_mean) ** 2, axis=0)
+
+            # import torch
+            # print('curr_var', curr_var, torch.var(torch.from_numpy(x), dim=0, unbiased=False, keepdim=True).numpy())
+
+            self.last_forward_result['mu'] = curr_mean
+            self.last_forward_result['sigma'] = curr_var
+
+            params['mu'].value = (1 - self.momentum) * params['mu'].value + self.momentum * curr_mean
+            params['sigma'].value = (1 - self.momentum) * params['sigma'].value + self.momentum * curr_var * (x.shape[0] / (x.shape[0] - 1))
+
+            if self.training:
+                res = (x - curr_mean[None, :]) / np.sqrt(curr_var[None, :] + eps)
+            else:
+                res = (x - params['mu'].value[None, :]) / np.sqrt(params['sigma'].value[None, :] + eps)
+
+            self.last_forward_result['normalization'] = res
+            return res
+
+        def f(x, params):
+            res = np.zeros_like(x)
+
+            x = normalization(x, params)
+
+            for sample_num in range(res.shape[0]):
+                for output_index in range(res.shape[1]):
+                    res[sample_num, output_index] = x[sample_num, output_index] * params['gamma'].value[output_index] + params['beta'].value[output_index]
+
+            return res
+
+        # dfdx = lambda x, params: np.tile(params['gamma'].value, (x.shape[0], 1))
+        #
+        # dfdgamma = lambda x, params: np.tile(x, (1, params['gamma'].value.shape[0]))
+        # dfdbeta = lambda x, params: np.ones((x.shape[0], params['beta'].value.shape[0]))
+        #
+        # dfdmu = lambda x, params: None
+        # dfdsigma = lambda x, params: None
+
+        def dmudx(x, params):
+            return np.ones((x.shape[0], x.shape[1])) / x.shape[0]
+
+        def dsigmadx(x, params):
+            return (2 / x.shape[0]) * (x - self.last_forward_result['mu'][None, :])
+
+        dfdgamma = lambda x, params: self.last_forward_result['normalization']#np.sum(self.last_forward_result['normalization'], axis=0)
+        dfdbeta = lambda x, params: np.ones_like(x)
+
+        def dfdx(x, params):
+            res = np.zeros_like(x)
+
+            mu = self.last_forward_result['mu']
+            sigma = self.last_forward_result['sigma']
+
+            # sigma_sqrt = np.sqrt(sigma + eps)
+            #
+            # dsdx = dsigmadx(x, params)
+
+            for sample_num in range(x.shape[0]):
+                for output_index in range(x.shape[1]):
+                    coef = params['gamma'].value[output_index] / (2 * (sigma[output_index] + eps) ** (3/2))
+
+                    res[sample_num, output_index] = coef * (1 - (1 / x.shape[0])) * (sigma[output_index] + eps) * 2
+                    res[sample_num, output_index] -= coef * (2 / x.shape[0]) * (x[sample_num, output_index] - mu[output_index]) ** 2
+
+            return res
 
 
-        f = lambda x, params: (np.matmul(params['A'].value[None, :, :], x[:, :, None]) + params['b'].value[:, None]).squeeze(-1)
-        dfdx = lambda x, params: np.tile(params['A'].value, (x.shape[0], 1, 1))#np.matmul(params['A'].value[None, :, :], np.ones_like(x[:, :, None])).squeeze(-1)
-
-        dfdA = lambda x, params: np.tile(np.expand_dims(x, axis=1), (1, params['A'].value.shape[0], 1))
-        dfdb = lambda x, params: np.ones((x.shape[0], params['b'].value.shape[0]))
-
-        df = lambda x, params: {'dfdx': dfdx(x, params), 'dfdA': dfdA(x, params), 'dfdb': dfdb(x, params)}
+        df = lambda x, params: {'dfdx': dfdx(x, params), 'dfdgamma': dfdgamma(x, params), 'dfdbeta': dfdbeta(x, params)}
 
         super(Layer, self).__init__(name='BatchNormalization', f=f, df=df, params=btchnrm_params)
         super(Layer, self).set_shape(input_size=input_size, output_size=input_size)
+
+    # def forward(self, x: np.ndarray) -> np.ndarray:
+    #     res = super(BatchNormalization, self).forward(x)
+    #     print(x.shape, self.last_forward_result['f'].shape)
+    #     return res
+
+    def backward(self):
+        curr_forward = self.last_forward_result
+        next_forward = self.next_nodes[0].last_forward_result
+
+        self.params['gamma'].grad = np.zeros_like(self.params['gamma'].grad)
+        self.params['beta'].grad = np.zeros_like(self.params['beta'].grad)
+
+        next_dfdx = next_forward['df']['dfdx']
+        if len(next_dfdx.shape) == 3:
+            next_dfdx = np.sum(next_dfdx, axis=1)
+
+        for sample_num in range(curr_forward['f'].shape[0]):
+            for output_index in range(self.output_size):
+                curr_forward['df']['dfdx'][sample_num, output_index] = next_dfdx[sample_num, output_index] * self.params['gamma'][output_index] * (np.sqrt(self.last_forward_result['sigma'][output_index] + eps))
+                curr_forward['df']['dfdx'][sample_num, output_index] += 0
+
+
+                # Sum reduction hard coded
+                self.params['gamma'].grad[output_index] += next_dfdx[sample_num, output_index] * curr_forward['df']['dfdgamma'][sample_num, output_index]
+
+                self.params['beta'].grad[output_index] += next_dfdx[sample_num, output_index] * curr_forward['df']['dfdbeta'][sample_num, output_index]
 
 
 class Optimizer:
